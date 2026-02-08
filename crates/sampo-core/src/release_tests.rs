@@ -1752,24 +1752,25 @@ tempfile = "3.0"
 
     #[test]
     fn leftover_prerelease_tmp_file_is_recovered() {
-        // Simulate crash after writing prerelease .md.tmp but before rename.
-        // The original prerelease .md still contains both stable and prerelease entries.
+        // Simulate crash after writing prerelease .md.tmp but before rename (step 2).
+        // In this state:
+        // - Original prerelease .md file still contains both stable and prerelease entries
+        // - Prerelease .md.tmp contains only the prerelease entry (the shrunk version)
+        // The recovery should promote the .md.tmp, effectively completing the shrink.
         let mut workspace = TestWorkspace::new();
         workspace
             .add_crate("a", "1.0.0-alpha.1")
             .add_crate("b", "2.0.0");
 
-        // Original prerelease file with BOTH entries (not shrunk yet)
-        workspace.add_preserved_changeset(
-            &["a", "b"],
-            Bump::Minor,
-            "Added shared feature for both",
-        );
+        const MESSAGE: &str = "Added shared feature for both";
+
+        // Original prerelease file with BOTH entries (simulating unshrunk state)
+        workspace.add_preserved_changeset(&["a", "b"], Bump::Minor, MESSAGE);
 
         // Leftover prerelease .md.tmp — the shrunk prerelease file that was never renamed
         let prerelease_dir = workspace.root.join(".sampo/prerelease");
         fs::create_dir_all(&prerelease_dir).unwrap();
-        let tmp_content = "---\na: minor\n---\n\nAdded shared feature for both\n";
+        let tmp_content = format!("---\na: minor\n---\n\n{}\n", MESSAGE);
         fs::write(
             prerelease_dir.join("addedsharedfeatureforboth.md.tmp"),
             tmp_content,
@@ -1789,7 +1790,7 @@ tempfile = "3.0"
 
         // The recovered prerelease temp file should be promoted, and b should be released
         workspace.assert_crate_version("b", "2.1.0");
-        workspace.assert_changelog_contains("b", "Added shared feature for both");
+        workspace.assert_changelog_contains("b", MESSAGE);
 
         // The prerelease changeset should now only contain the prerelease entry
         let prerelease_files: Vec<_> = fs::read_dir(&prerelease_dir)
@@ -1805,30 +1806,29 @@ tempfile = "3.0"
     }
 
     #[test]
-    fn no_duplicate_stable_entries_after_crash_before_prerelease_rename() {
-        // This test verifies the fix for the duplication bug. With the NEW write order,
-        // if we crash after writing the stable .md.tmp but BEFORE shrinking the prerelease
-        // file, the stable temp should NOT be promoted because the prerelease file hasn't
-        // been shrunk yet. But with our NEW order, we shrink prerelease BEFORE writing
-        // stable temp, so this scenario can't happen.
-        //
-        // However, we can still test that leftover stable temps are handled correctly:
-        // If a stable .md.tmp exists, it means prerelease was already shrunk (step 2 done),
-        // so promoting the temp is safe.
-
+    fn stable_tmp_file_safe_to_promote_after_prerelease_shrunk() {
+        // Verify the new write order prevents duplicates. This test simulates a crash
+        // after completing step 3 (write stable .md.tmp) but before step 4 (rename it).
+        // With the NEW write order, we know the prerelease file was already shrunk in
+        // step 2, so promoting the stable temp is safe and won't create duplicates.
         let mut workspace = TestWorkspace::new();
         workspace
             .add_crate("a", "1.0.0-alpha.1")
             .add_crate("b", "2.0.0");
 
+        const MESSAGE: &str = "Crash recovery test";
+
         // Prerelease file already shrunk (step 2 completed)
-        workspace.add_preserved_changeset(&["a"], Bump::Minor, "Crash recovery test");
+        workspace.add_preserved_changeset(&["a"], Bump::Minor, MESSAGE);
 
         // Leftover stable .md.tmp (step 4 didn't complete)
         let changesets_dir = workspace.root.join(".sampo/changesets");
         fs::create_dir_all(&changesets_dir).unwrap();
-        let tmp_content = "---\nb: minor\n---\n\nCrash recovery test\n";
+        let tmp_content = format!("---\nb: minor\n---\n\n{}\n", MESSAGE);
         fs::write(changesets_dir.join("crashrecoverytest.md.tmp"), tmp_content).unwrap();
+
+        // Ensure we're on the correct branch for this test
+        let _guard = EnvVarGuard::set("SAMPO_RELEASE_BRANCH", "main");
 
         let output = workspace
             .run_release(false)
@@ -1852,7 +1852,7 @@ tempfile = "3.0"
 
         // Verify no duplicate changelog entries
         let changelog = workspace.read_changelog("b");
-        let feature_count = changelog.matches("Crash recovery test").count();
+        let feature_count = changelog.matches(MESSAGE).count();
         assert_eq!(
             feature_count, 1,
             "Should have exactly one changelog entry, found {}",
