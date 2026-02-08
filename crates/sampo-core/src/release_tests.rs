@@ -1795,6 +1795,29 @@ tempfile = "3.0"
         workspace.assert_crate_version("b", "2.1.0");
         workspace.assert_changelog_contains("b", MESSAGE);
 
+        // Assert that the .md.tmp file was removed (promoted/renamed)
+        let tmp_path = prerelease_dir.join("addedsharedfeatureforboth.md.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "The .md.tmp file should have been promoted and no longer exist"
+        );
+
+        // Assert that the .md file exists and was shrunk (no longer contains stable b: entry)
+        let md_path = prerelease_dir.join("addedsharedfeatureforboth.md");
+        assert!(
+            md_path.exists(),
+            "The .md file should exist after promotion"
+        );
+        let md_content = fs::read_to_string(&md_path).unwrap();
+        assert!(
+            !md_content.contains("b:"),
+            "The prerelease .md file should not contain the stable 'b:' entry after shrinking"
+        );
+        assert!(
+            md_content.contains("a: minor"),
+            "The prerelease .md file should still contain the prerelease 'a:' entry"
+        );
+
         // The prerelease changeset should now only contain the prerelease entry
         let prerelease_files: Vec<_> = fs::read_dir(&prerelease_dir)
             .unwrap()
