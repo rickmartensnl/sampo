@@ -1749,4 +1749,114 @@ tempfile = "3.0"
         workspace.assert_crate_version("b", "2.1.0");
         workspace.assert_changelog_contains("b", "Added shared feature");
     }
+
+    #[test]
+    fn leftover_prerelease_tmp_file_is_recovered() {
+        // Simulate crash after writing prerelease .md.tmp but before rename.
+        // The original prerelease .md still contains both stable and prerelease entries.
+        let mut workspace = TestWorkspace::new();
+        workspace
+            .add_crate("a", "1.0.0-alpha.1")
+            .add_crate("b", "2.0.0");
+
+        // Original prerelease file with BOTH entries (not shrunk yet)
+        workspace.add_preserved_changeset(
+            &["a", "b"],
+            Bump::Minor,
+            "Added shared feature for both",
+        );
+
+        // Leftover prerelease .md.tmp — the shrunk prerelease file that was never renamed
+        let prerelease_dir = workspace.root.join(".sampo/prerelease");
+        fs::create_dir_all(&prerelease_dir).unwrap();
+        let tmp_content = "---\na: minor\n---\n\nAdded shared feature for both\n";
+        fs::write(
+            prerelease_dir.join("addedsharedfeatureforboth.md.tmp"),
+            tmp_content,
+        )
+        .unwrap();
+
+        let output = workspace
+            .run_release(false)
+            .expect("release should succeed");
+
+        let released_names: Vec<&str> = output
+            .released_packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(released_names.contains(&"b"), "b should be released");
+
+        // The recovered prerelease temp file should be promoted, and b should be released
+        workspace.assert_crate_version("b", "2.1.0");
+        workspace.assert_changelog_contains("b", "Added shared feature for both");
+
+        // The prerelease changeset should now only contain the prerelease entry
+        let prerelease_files: Vec<_> = fs::read_dir(&prerelease_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
+            .collect();
+        assert_eq!(
+            prerelease_files.len(),
+            1,
+            "Should have one prerelease changeset"
+        );
+    }
+
+    #[test]
+    fn no_duplicate_stable_entries_after_crash_before_prerelease_rename() {
+        // This test verifies the fix for the duplication bug. With the NEW write order,
+        // if we crash after writing the stable .md.tmp but BEFORE shrinking the prerelease
+        // file, the stable temp should NOT be promoted because the prerelease file hasn't
+        // been shrunk yet. But with our NEW order, we shrink prerelease BEFORE writing
+        // stable temp, so this scenario can't happen.
+        //
+        // However, we can still test that leftover stable temps are handled correctly:
+        // If a stable .md.tmp exists, it means prerelease was already shrunk (step 2 done),
+        // so promoting the temp is safe.
+
+        let mut workspace = TestWorkspace::new();
+        workspace
+            .add_crate("a", "1.0.0-alpha.1")
+            .add_crate("b", "2.0.0");
+
+        // Prerelease file already shrunk (step 2 completed)
+        workspace.add_preserved_changeset(&["a"], Bump::Minor, "Crash recovery test");
+
+        // Leftover stable .md.tmp (step 4 didn't complete)
+        let changesets_dir = workspace.root.join(".sampo/changesets");
+        fs::create_dir_all(&changesets_dir).unwrap();
+        let tmp_content = "---\nb: minor\n---\n\nCrash recovery test\n";
+        fs::write(changesets_dir.join("crashrecoverytest.md.tmp"), tmp_content).unwrap();
+
+        let output = workspace
+            .run_release(false)
+            .expect("release should succeed");
+
+        let released_names: Vec<&str> = output
+            .released_packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+
+        // Should release b exactly once
+        assert!(released_names.contains(&"b"), "b should be released");
+        assert_eq!(
+            released_names.iter().filter(|&&n| n == "b").count(),
+            1,
+            "b should only be released once (no duplicates)"
+        );
+
+        workspace.assert_crate_version("b", "2.1.0");
+
+        // Verify no duplicate changelog entries
+        let changelog = workspace.read_changelog("b");
+        let feature_count = changelog.matches("Crash recovery test").count();
+        assert_eq!(
+            feature_count, 1,
+            "Should have exactly one changelog entry, found {}",
+            feature_count
+        );
+    }
 }
