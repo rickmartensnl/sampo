@@ -1777,6 +1777,9 @@ tempfile = "3.0"
         )
         .unwrap();
 
+        // Ensure we're on the correct branch for this test
+        let _guard = EnvVarGuard::set("SAMPO_RELEASE_BRANCH", "main");
+
         let output = workspace
             .run_release(false)
             .expect("release should succeed");
