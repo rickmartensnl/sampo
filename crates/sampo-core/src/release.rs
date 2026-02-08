@@ -849,6 +849,16 @@ fn restore_stable_preserved_changesets(
                 .map_err(|e| SampoError::Io(io_error_with_path(e, &prerelease_tmp_path)))?;
 
             fs::rename(&prerelease_tmp_path, &path)
+                .or_else(|e| {
+                    if cfg!(windows) && e.kind() == std::io::ErrorKind::AlreadyExists {
+                        // On Windows, std::fs::rename fails if the destination exists.
+                        // Fall back to remove-then-rename to emulate replace semantics.
+                        fs::remove_file(&path)?;
+                        fs::rename(&prerelease_tmp_path, &path)
+                    } else {
+                        Err(e)
+                    }
+                })
                 .map_err(|e| SampoError::Io(io_error_with_path(e, &path)))?;
 
             let stable_tmp_path = stable_path.with_extension("md.tmp");
