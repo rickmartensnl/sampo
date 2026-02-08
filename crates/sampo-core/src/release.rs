@@ -493,6 +493,7 @@ pub fn run_release(root: &std::path::Path, dry_run: bool) -> Result<ReleaseOutpu
     // Recover any .md.tmp files left by a previously interrupted mixed-changeset
     // split before loading, so they are visible to load_changesets.
     promote_leftover_tmp_files(&changesets_dir)?;
+    promote_leftover_tmp_files(&prerelease_dir)?;
 
     let current_changesets = load_changesets(&changesets_dir, &config.changesets_tags)?;
     let preserved_changesets = load_changesets(&prerelease_dir, &config.changesets_tags)?;
@@ -824,10 +825,12 @@ fn restore_stable_preserved_changesets(
             // All entries target prerelease packages — leave untouched
         } else {
             // Mixed: write stable entries to changesets dir, rewrite prerelease file.
-            // Write order ensures a crash never duplicates stable entries in both dirs:
-            //   1. Write stable content to a .md.tmp file (invisible to load_changesets)
-            //   2. Shrink the prerelease file (remove stable entries)
-            //   3. Atomically rename .md.tmp → .md to make stable file visible
+            // Write order ensures a crash never duplicates stable entries in both dirs
+            // and both writes are atomic (temp file + rename):
+            //   1. Write stable content to a .md.tmp file in changesets dir
+            //   2. Write prerelease content to a .md.tmp file in prerelease dir
+            //   3. Atomically rename prerelease .md.tmp → .md (shrinks prerelease file)
+            //   4. Atomically rename changesets .md.tmp → .md (makes stable file visible)
             fs::create_dir_all(changesets_dir)?;
             let file_name = path
                 .file_name()
@@ -837,18 +840,22 @@ fn restore_stable_preserved_changesets(
                 stable_path = unique_destination_path(changesets_dir, file_name);
             }
 
-            let tmp_path = stable_path.with_extension("md.tmp");
+            let stable_tmp_path = stable_path.with_extension("md.tmp");
             let stable_content =
                 render_changeset_markdown_with_tags(&stable_entries, &parsed.message);
-            fs::write(&tmp_path, &stable_content)
-                .map_err(|e| SampoError::Io(io_error_with_path(e, &tmp_path)))?;
+            fs::write(&stable_tmp_path, &stable_content)
+                .map_err(|e| SampoError::Io(io_error_with_path(e, &stable_tmp_path)))?;
 
+            let prerelease_tmp_path = path.with_extension("md.tmp");
             let prerelease_content =
                 render_changeset_markdown_with_tags(&prerelease_entries, &parsed.message);
-            fs::write(&path, prerelease_content)
+            fs::write(&prerelease_tmp_path, &prerelease_content)
+                .map_err(|e| SampoError::Io(io_error_with_path(e, &prerelease_tmp_path)))?;
+
+            fs::rename(&prerelease_tmp_path, &path)
                 .map_err(|e| SampoError::Io(io_error_with_path(e, &path)))?;
 
-            fs::rename(&tmp_path, &stable_path)
+            fs::rename(&stable_tmp_path, &stable_path)
                 .map_err(|e| SampoError::Io(io_error_with_path(e, &stable_path)))?;
         }
     }
@@ -857,13 +864,13 @@ fn restore_stable_preserved_changesets(
 }
 
 /// Promote any `.md.tmp` files left behind by a previous interrupted mixed-changeset
-/// split. These files contain stable entries that were written but never renamed
-/// into place before the process crashed.
-fn promote_leftover_tmp_files(changesets_dir: &Path) -> Result<()> {
-    if !changesets_dir.exists() {
+/// split. These temp files may contain either stable or prerelease entries that were
+/// written but never renamed into place before the process crashed.
+fn promote_leftover_tmp_files(dir: &Path) -> Result<()> {
+    if !dir.exists() {
         return Ok(());
     }
-    for entry in fs::read_dir(changesets_dir)? {
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
@@ -875,7 +882,7 @@ fn promote_leftover_tmp_files(changesets_dir: &Path) -> Result<()> {
         };
         // Strip the ".tmp" suffix to get the intended .md path
         let target_name = &name[..name.len() - ".tmp".len()];
-        let target = changesets_dir.join(target_name);
+        let target = dir.join(target_name);
         if target.exists() {
             // The intended target already exists, so this tmp file is stale.
             // Remove it instead of creating a duplicate visible changeset.
